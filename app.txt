@@ -1,0 +1,164 @@
+#COHERE_API_KEY=Rmo8taNxJbXy11OAwgiyvCTlV0e1MuCPiXo8cMgZ   done
+COHERE_API_KEY=VIGi9ozeYA8b7A70Wt5E2GIpF19ig0klTrxFHpuJ
+COHERE_API_KEY=5LEXVbutBL2gDX0UvPWuI4GOq5wHXtyCunSeIh05 bibi
+import streamlit as st
+from llama_index.llms.litellm import LiteLLM
+from llama_index.core.response.notebook_utils import display_source_node
+from IPython.display import Markdown, display
+from llama_index.core.node_parser import (
+    HierarchicalNodeParser,
+    SentenceSplitter,
+)
+from llama_index.embeddings.cohere import CohereEmbedding
+from llama_index.core.node_parser import get_leaf_nodes, get_root_nodes
+from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.core.retrievers import AutoMergingRetriever
+from llama_index.postprocessor.cohere_rerank import CohereRerank
+from llama_index.core.query_engine import RetrieverQueryEngine,RouterQueryEngine
+from llama_index.core.prompts import PromptTemplate
+import nest_asyncio
+from llama_index.core import SummaryIndex,VectorStoreIndex,SimpleKeywordTableIndex, SimpleDirectoryReader,StorageContext
+from llama_index.core.tools import QueryEngineTool
+from llama_index.core.selectors import  LLMMultiSelector
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+# Access the API key
+cohere_api_key = os.getenv("COHERE_API_KEY")
+
+llm = LiteLLM("command-nightly",temperature=0.1)
+embed_model = CohereEmbedding(
+    cohere_api_key=cohere_api_key,
+    model_name="embed-english-v3.0",
+    input_type="search_document",
+)
+# Function to save uploaded file to a temporary location
+def create_directory_for_uploaded_files(uploaded_files):
+    # Create a directory to contain all uploaded files
+    directory_path = "all_uploaded_files"
+    os.makedirs(directory_path, exist_ok=True)
+
+    # Save each uploaded file into the directory
+    for uploaded_file in uploaded_files:
+        file_path = os.path.join(directory_path, uploaded_file.name)
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.read())
+    
+    return directory_path
+def upload_document(uploaded_file):
+    #uploaded_file = st.file_uploader("Upload a document", type=['txt', 'pdf'], accept_multiple_files=True)
+    if uploaded_file is not None:
+        data = create_directory_for_uploaded_files(uploaded_file)
+        documents = SimpleDirectoryReader(data).load_data()
+        node_parser = HierarchicalNodeParser.from_defaults()
+        nodes = node_parser.get_nodes_from_documents(documents)
+        leaf_nodes = get_leaf_nodes(nodes)
+        root_nodes = get_root_nodes(nodes)
+        docstore = SimpleDocumentStore()
+
+        # Insert nodes into docstore
+        docstore.add_documents(nodes)
+
+        # Define storage context (will include vector store by default too)
+        storage_context = StorageContext.from_defaults(docstore=docstore)
+
+        index = VectorStoreIndex(
+            leaf_nodes,
+            storage_context=storage_context,
+            embed_model=embed_model
+        )
+
+        base_retriever = index.as_retriever(similarity_top_k=6)
+        retriever = AutoMergingRetriever(base_retriever, storage_context, verbose=True)
+        cohere_rerank = CohereRerank(api_key=cohere_api_key, top_n=3)
+        auto_merging_query_engine = RetrieverQueryEngine.from_args(retriever, llm=llm, node_postprocessors=[cohere_rerank],streaming=True)
+        qa_prompt_tmpl_str = (
+            "Context information is below.\n"
+            "---------------------\n"
+            "{context_str}\n"
+            "---------------------\n"
+            "Given the context information and not prior knowledge, "
+            "answer the query in a well formed text .\n"
+            "If you don't know, say 'I don't know' only.\n"
+            "Query: {query_str}\n"
+            "Answer: "
+        )
+        prompt_tmpl = PromptTemplate(qa_prompt_tmpl_str)
+        auto_merging_query_engine.update_prompts(
+            {"response_synthesizer:text_qa_template": prompt_tmpl}
+        )
+        summary_index = SummaryIndex(nodes, storage_context=storage_context, embed_model=embed_model)
+        keyword_index = SimpleKeywordTableIndex(leaf_nodes, storage_context=storage_context, embed_model=embed_model, llm=llm)
+        list_query_engine = summary_index.as_query_engine(
+            response_mode="tree_summarize",
+            use_async=True,
+            llm=llm,
+            streaming=True
+        )
+        keyword_query_engine = keyword_index.as_query_engine(llm=llm,streaming=True)
+
+        list_tool = QueryEngineTool.from_defaults(
+            query_engine=list_query_engine,
+            description=(
+                "Useful for summarization questions related to the given context"
+            ),
+        )
+
+        vector_tool = QueryEngineTool.from_defaults(
+            query_engine=auto_merging_query_engine,
+            description=(
+                "Useful for retrieving specific context using semantic search"
+            ),
+        )
+        keyword_tool = QueryEngineTool.from_defaults(
+            query_engine=keyword_query_engine,
+            description=(
+                "Useful for retrieving specific context using keywords from the given context"
+            ),
+        )
+        query_engine = RouterQueryEngine(
+            llm=llm,
+            selector=LLMMultiSelector.from_defaults(llm=llm),
+            query_engine_tools=[
+                list_tool,
+                vector_tool,
+                keyword_tool
+            ]
+        )
+
+        return query_engine
+    return None
+
+
+
+
+# Function to display chat interface
+def query(query_engine,user_input):
+  response=query_engine.query(user_input)
+  #for text in response.response_gen:
+  st.write_stream(response.response_gen)
+# Main function
+def main():
+    st.title("Document Chat Interface")
+    # Display interface to upload a document
+    st.header("Upload Document")
+    uploaded_file = st.file_uploader("Upload a document", type=['txt', 'pdf'], accept_multiple_files=True)
+    #st.header(uploaded_file)
+    # Initialize chat interface
+    st.header("Chat with Document")
+    st.text_area("Chat Box", height=100, key="user_input")
+
+    query_engine = None  # Initialize query engine
+
+    # If a document is uploaded, load the query engine
+    if uploaded_file != []:
+        query_engine = upload_document(uploaded_file)
+        
+    if st.button("Send") and query_engine is not None:
+        user_input = st.session_state.user_input
+        query(query_engine, user_input)
+
+if __name__ == "__main__":
+    main()
