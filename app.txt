@@ -1,6 +1,3 @@
-#COHERE_API_KEY=Rmo8taNxJbXy11OAwgiyvCTlV0e1MuCPiXo8cMgZ   done
-COHERE_API_KEY=VIGi9ozeYA8b7A70Wt5E2GIpF19ig0klTrxFHpuJ
-COHERE_API_KEY=5LEXVbutBL2gDX0UvPWuI4GOq5wHXtyCunSeIh05 bibi
 import streamlit as st
 from llama_index.llms.litellm import LiteLLM
 from llama_index.core.response.notebook_utils import display_source_node
@@ -131,14 +128,11 @@ def upload_document(uploaded_file):
         return query_engine
     return None
 
-
-
-
 # Function to display chat interface
 def query(query_engine,user_input):
   response=query_engine.query(user_input)
-  #for text in response.response_gen:
-  st.write_stream(response.response_gen)
+  st.write("Answer:")
+  st.write(str(response))
 # Main function
 def main():
     st.title("Document Chat Interface")
@@ -148,7 +142,7 @@ def main():
     #st.header(uploaded_file)
     # Initialize chat interface
     st.header("Chat with Document")
-    st.text_area("Chat Box", height=100, key="user_input")
+    prompt=st.chat_input("Enter your query", key="user_input")
 
     query_engine = None  # Initialize query engine
 
@@ -156,7 +150,7 @@ def main():
     if uploaded_file != []:
         query_engine = upload_document(uploaded_file)
         
-    if st.button("Send") and query_engine is not None:
+    if prompt and query_engine is not None:
         user_input = st.session_state.user_input
         query(query_engine, user_input)
 
